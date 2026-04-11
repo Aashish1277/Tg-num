@@ -7,37 +7,38 @@ from flask import Flask, request
 # --- CONFIGURATION ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = 5714613336
-CHANNEL_ID = "@TechTrovebyb44ner"  # Updated to your channel
 API_URL = "https://ayaanmods.site/number.php?key=annonymous&number="
+CHANNEL_USERNAME = "@TechTrovebyb44ner"  # The channel username for force join
+CHANNEL_URL = "https://t.me/TechTrovebyb44ner"
 
+# Use threaded=False to prevent double-processing in Webhook environments
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=False)
 app = Flask(__name__)
+
+# Keep-alive session for faster API requests
 session = requests.Session()
 
-# --- FORCE JOIN CHECKER ---
+# --- HELPER FUNCTIONS ---
 
-def is_user_member(user_id):
-    """Checks if the user is a member of the required channel."""
+def is_user_joined(user_id):
+    """Checks if the user is a member, admin, or creator of the required channel."""
     try:
-        member = bot.get_chat_member(CHANNEL_ID, user_id)
-        # Statuses that mean the user is in the channel
-        return member.status in ['member', 'administrator', 'creator']
+        status = bot.get_chat_member(CHANNEL_USERNAME, user_id).status
+        return status in ["member", "administrator", "creator"]
     except Exception as e:
-        # If bot is not admin or channel username is wrong, we allow access 
-        # to prevent locking everyone out due to a bot permission error.
-        print(f"Force Join Error: {e}")
-        return True
+        # If the bot is not admin in the channel, this might fail
+        return False
 
-def force_join_keyboard():
-    """Returns a keyboard with the join link and a verify button."""
+# --- KEYBOARDS ---
+
+def join_markup():
+    """Keyboard shown when user hasn't joined the channel."""
     markup = types.InlineKeyboardMarkup()
-    btn_join = types.InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/TechTrovebyb44ner")
-    btn_verify = types.InlineKeyboardButton("🔄 Verified / Try Again", callback_data="start_search")
+    btn_join = types.InlineKeyboardButton("📢 Join Channel To Use Bot", url=CHANNEL_URL)
+    btn_verify = types.InlineKeyboardButton("🔄 I have joined", callback_data="check_join")
     markup.add(btn_join)
     markup.add(btn_verify)
     return markup
-
-# --- KEYBOARDS ---
 
 def main_menu():
     markup = types.InlineKeyboardMarkup()
@@ -55,12 +56,11 @@ def result_buttons():
 
 @bot.message_handler(commands=['start'])
 def welcome(message):
-    # Check join status
-    if not is_user_member(message.from_user.id):
+    if not is_user_joined(message.from_user.id):
         bot.send_message(
             message.chat.id, 
-            f"<b>❌ ACCESS DENIED ❌</b>\n\nYou must join our channel to use this bot.\n\nJoin <b>{CHANNEL_ID}</b> and click verify to continue.", 
-            reply_markup=force_join_keyboard()
+            f"<b>❌ ACCESS DENIED ❌</b>\n\nYou must join our channel to use this bot.\n\nJoin here: {CHANNEL_USERNAME}", 
+            reply_markup=join_markup()
         )
         return
 
@@ -68,8 +68,9 @@ def welcome(message):
         "<b>🌟 WELCOME TO PRO NUMBER FINDER 🌟</b>\n\n"
         "<i>The most advanced tool to find mobile registration details instantly.</i>\n\n"
         "<b>✅ High Accuracy</b>\n"
-        "<b>✅ Fast Server Access</b>\n\n"
-        "Click below to begin your search."
+        "<b>✅ Fast Server Access</b>\n"
+        "<b>✅ Unlimited Searches</b>\n\n"
+        "Click the button below to begin your search."
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu())
 
@@ -77,46 +78,47 @@ def welcome(message):
 
 @bot.callback_query_handler(func=lambda call: True)
 def handle_query(call):
-    # Force Join Check on every button click
-    if not is_user_member(call.from_user.id):
-        bot.answer_callback_query(call.id, "❌ Join the channel first!", show_alert=True)
-        try:
-            bot.edit_message_text(
-                f"<b>❌ JOIN CHANNEL ❌</b>\n\nYou must be a member of {CHANNEL_ID} to use this bot.",
-                call.message.chat.id,
-                call.message.message_id,
-                reply_markup=force_join_keyboard()
-            )
-        except: pass
-        return
+    if call.data == "check_join":
+        if is_user_joined(call.from_user.id):
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+            welcome(call.message)
+        else:
+            bot.answer_callback_query(call.id, "⚠️ You haven't joined yet!", show_alert=True)
 
-    if call.data == "start_search":
-        bot.send_message(call.message.chat.id, "<b>📥 INPUT NUMBER</b>\n\nPlease send the 10-digit mobile number:")
+    elif call.data == "start_search":
+        if not is_user_joined(call.from_user.id):
+            bot.send_message(call.message.chat.id, "<b>⚠️ Please join the channel first!</b>", reply_markup=join_markup())
+        else:
+            bot.send_message(call.message.chat.id, "<b>📥 INPUT NUMBER</b>\n\nPlease send the 10-digit mobile number:")
+            
     elif call.data == "delete_msg":
         try:
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except:
             pass
-    
     bot.answer_callback_query(call.id)
 
 # --- CORE SEARCH LOGIC ---
 
 @bot.message_handler(func=lambda message: message.text and message.text.isdigit())
 def process_lookup(message):
-    # Final check before performing API call
-    if not is_user_member(message.from_user.id):
-        bot.send_message(message.chat.id, "❌ Access Denied! Join the channel to search.", reply_markup=force_join_keyboard())
+    # Force Join Check
+    if not is_user_joined(message.from_user.id):
+        bot.send_message(message.chat.id, "<b>⚠️ Access Denied! Join the channel first.</b>", reply_markup=join_markup())
         return
 
     number = message.text.strip()
+
+    # Input Validation
     if len(number) < 10:
-        bot.reply_to(message, "⚠️ <b>Invalid Input:</b> Enter a valid 10-digit number.")
+        bot.reply_to(message, "⚠️ <b>Invalid Input:</b> Please enter a valid 10-digit number.")
         return
 
+    # 1. Immediate response to prevent user frustration
     status = bot.send_message(message.chat.id, "<b>📡 Accessing Secure Database...</b>")
 
     try:
+        # 2. API Request with optimized timeout
         headers = {'User-Agent': 'Mozilla/5.0'}
         response = session.get(f"{API_URL}{number}", headers=headers, timeout=5)
         
@@ -124,15 +126,16 @@ def process_lookup(message):
             try:
                 data = response.json()
             except:
-                bot.edit_message_text("⚠️ <b>API Error:</b> Invalid response from server.", message.chat.id, status.message_id)
+                bot.edit_message_text("⚠️ <b>API Error:</b> The server returned an invalid response.", message.chat.id, status.message_id)
                 return
             
             if "result" in data and data["result"]:
                 final_response = ""
-                # Display only top 3 results to avoid message limit errors
+                # We limit results to top 3 to avoid hitting Telegram message character limits
                 records = data["result"][:3]
                 
                 for index, record in enumerate(records, start=1):
+                    # Cleaning up data for display
                     name = str(record.get("name", "N/A")).title()
                     phone = record.get("mobile", "N/A")
                     alt_phone = record.get("alternate", "N/A") or "N/A"
@@ -156,11 +159,12 @@ def process_lookup(message):
                 bot.delete_message(message.chat.id, status.message_id)
                 bot.send_message(message.chat.id, final_response, reply_markup=result_buttons())
                 
-                # --- ADMIN LOG WITH USERNAME ---
+                # --- ADMIN NOTIFICATION ---
                 user = message.from_user
                 username = f"@{user.username}" if user.username else "No Username"
+                
                 admin_log = (
-                    f"✅ <b>New Search</b>\n\n"
+                    f"✅ <b>Search Successful</b>\n\n"
                     f"🔢 <b>Number:</b> <code>{number}</code>\n"
                     f"👤 <b>User:</b> {user.first_name}\n"
                     f"🆔 <b>ID:</b> <code>{user.id}</code>\n"
@@ -172,16 +176,16 @@ def process_lookup(message):
                     pass
             
             else:
-                bot.edit_message_text("❌ <b>Data Not Found.</b>", message.chat.id, status.message_id)
+                bot.edit_message_text("❌ <b>Data Not Found:</b> No records found in our database.", message.chat.id, status.message_id)
         else:
-            bot.edit_message_text("⚠️ <b>Server Busy:</b> API returned error code.", message.chat.id, status.message_id)
+            bot.edit_message_text("⚠️ <b>API Error:</b> Server busy or down.", message.chat.id, status.message_id)
 
     except requests.exceptions.Timeout:
-        bot.edit_message_text("⏳ <b>Timeout:</b> Search is taking too long. Try again.", message.chat.id, status.message_id)
-    except Exception:
+        bot.edit_message_text("⏳ <b>Timeout:</b> Search took too long. Please try again.", message.chat.id, status.message_id)
+    except Exception as e:
         bot.edit_message_text("🚫 <b>System Error:</b> Please try again later.", message.chat.id, status.message_id)
 
-# --- VERCEL / FLASK HANDLER ---
+# --- VERCEL FLASK HANDLER ---
 
 @app.route('/' + BOT_TOKEN if BOT_TOKEN else '/webhook', methods=['POST'])
 def webhook():
@@ -194,8 +198,11 @@ def webhook():
 
 @app.route('/')
 def index():
-    return "Bot is running with Force Join for @TechTrovebyb44ner", 200
+    return "Bot is running perfectly.", 200
 
 @app.route('/webhook', methods=['POST'])
 def legacy_webhook():
     return webhook()
+
+if __name__ == "__main__":
+    app.run(debug=False)
