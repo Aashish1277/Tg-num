@@ -3,41 +3,46 @@ import requests
 import telebot
 from telebot import types
 from flask import Flask, request
+import logging
 
 # --- CONFIGURATION ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ADMIN_ID = 5714613336
 API_URL = "https://ayaanmods.site/number.php?key=annonymous&number="
-CHANNEL_USERNAME = "@TechTrovebyb44ner"  # The channel username for force join
+CHANNEL_USERNAME = "@TechTrovebyb44ner" 
 CHANNEL_URL = "https://t.me/TechTrovebyb44ner"
 
-# Use threaded=False to prevent double-processing in Webhook environments
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=False)
+# Configure Logging
+logging.basicConfig(level=logging.INFO)
+
+# Initialize Bot - threaded=True helps handle multiple requests without blocking
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", threaded=True)
 app = Flask(__name__)
 
-# Keep-alive session for faster API requests
+# Persistent session for connection pooling (Significant speed boost)
 session = requests.Session()
+session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/110.0.0.0 Safari/537.36'})
 
 # --- HELPER FUNCTIONS ---
 
 def is_user_joined(user_id):
-    """Checks if the user is a member, admin, or creator of the required channel."""
+    """Checks if the user is a member of the required channel."""
+    if user_id == ADMIN_ID: return True # Admin bypass
     try:
-        status = bot.get_chat_member(CHANNEL_USERNAME, user_id).status
-        return status in ["member", "administrator", "creator"]
+        member = bot.get_chat_member(CHANNEL_USERNAME, user_id)
+        return member.status in ["member", "administrator", "creator"]
     except Exception as e:
-        # If the bot is not admin in the channel, this might fail
+        logging.error(f"Join check error: {e}")
+        # If bot is not admin in channel, it returns False. 
+        # Make sure bot is Admin in the channel!
         return False
 
 # --- KEYBOARDS ---
 
 def join_markup():
-    """Keyboard shown when user hasn't joined the channel."""
     markup = types.InlineKeyboardMarkup()
-    btn_join = types.InlineKeyboardButton("📢 Join Channel To Use Bot", url=CHANNEL_URL)
-    btn_verify = types.InlineKeyboardButton("🔄 I have joined", callback_data="check_join")
-    markup.add(btn_join)
-    markup.add(btn_verify)
+    markup.add(types.InlineKeyboardButton("📢 Join Channel", url=CHANNEL_URL))
+    markup.add(types.InlineKeyboardButton("🔄 Verify Membership", callback_data="check_join"))
     return markup
 
 def main_menu():
@@ -47,9 +52,10 @@ def main_menu():
 
 def result_buttons():
     markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_new = types.InlineKeyboardButton("🔎 New Search", callback_data="start_search")
-    btn_del = types.InlineKeyboardButton("🗑️ Clear Result", callback_data="delete_msg")
-    markup.add(btn_new, btn_del)
+    markup.add(
+        types.InlineKeyboardButton("🔎 New Search", callback_data="start_search"),
+        types.InlineKeyboardButton("🗑️ Clear", callback_data="delete_msg")
+    )
     return markup
 
 # --- COMMANDS ---
@@ -59,18 +65,14 @@ def welcome(message):
     if not is_user_joined(message.from_user.id):
         bot.send_message(
             message.chat.id, 
-            f"<b>❌ ACCESS DENIED ❌</b>\n\nYou must join our channel to use this bot.\n\nJoin here: {CHANNEL_USERNAME}", 
+            f"<b>❌ ACCESS DENIED</b>\n\nYou must join our channel to use this bot.", 
             reply_markup=join_markup()
         )
         return
 
     welcome_text = (
-        "<b>🌟 WELCOME TO PRO NUMBER FINDER 🌟</b>\n\n"
-        "<i>The most advanced tool to find mobile registration details instantly.</i>\n\n"
-        "<b>✅ High Accuracy</b>\n"
-        "<b>✅ Fast Server Access</b>\n"
-        "<b>✅ Unlimited Searches</b>\n\n"
-        "Click the button below to begin your search."
+        "<b>🌟 PRO NUMBER FINDER 🌟</b>\n\n"
+        "Send a 10-digit mobile number to get details."
     )
     bot.send_message(message.chat.id, welcome_text, reply_markup=main_menu())
 
@@ -80,129 +82,91 @@ def welcome(message):
 def handle_query(call):
     if call.data == "check_join":
         if is_user_joined(call.from_user.id):
-            bot.delete_message(call.message.chat.id, call.message.message_id)
+            bot.edit_message_text("✅ Access Granted!", call.message.chat.id, call.message.message_id)
             welcome(call.message)
         else:
-            bot.answer_callback_query(call.id, "⚠️ You haven't joined yet!", show_alert=True)
+            bot.answer_callback_query(call.id, "⚠️ You still haven't joined!", show_alert=True)
 
     elif call.data == "start_search":
-        if not is_user_joined(call.from_user.id):
-            bot.send_message(call.message.chat.id, "<b>⚠️ Please join the channel first!</b>", reply_markup=join_markup())
-        else:
-            bot.send_message(call.message.chat.id, "<b>📥 INPUT NUMBER</b>\n\nPlease send the 10-digit mobile number:")
+        bot.send_message(call.message.chat.id, "<b>📥 Send the 10-digit mobile number:</b>")
+        bot.answer_callback_query(call.id)
             
     elif call.data == "delete_msg":
-        try:
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        except:
-            pass
-    bot.answer_callback_query(call.id)
+        bot.delete_message(call.message.chat.id, call.message.message_id)
 
 # --- CORE SEARCH LOGIC ---
 
 @bot.message_handler(func=lambda message: message.text and message.text.isdigit())
 def process_lookup(message):
-    # Force Join Check
-    if not is_user_joined(message.from_user.id):
-        bot.send_message(message.chat.id, "<b>⚠️ Access Denied! Join the channel first.</b>", reply_markup=join_markup())
-        return
-
+    user_id = message.from_user.id
     number = message.text.strip()
 
-    # Input Validation
-    if len(number) < 10:
-        bot.reply_to(message, "⚠️ <b>Invalid Input:</b> Please enter a valid 10-digit number.")
+    # 1. Force Join Check
+    if not is_user_joined(user_id):
+        bot.send_message(message.chat.id, "<b>⚠️ Join the channel first!</b>", reply_markup=join_markup())
         return
 
-    # 1. Immediate response to prevent user frustration
-    status = bot.send_message(message.chat.id, "<b>📡 Accessing Secure Database...</b>")
+    # 2. Validation
+    if len(number) != 10:
+        bot.reply_to(message, "⚠️ <b>Error:</b> Please enter exactly 10 digits.")
+        return
+
+    # 3. Processing notification
+    status_msg = bot.send_message(message.chat.id, "<b>📡 Searching Database...</b>")
 
     try:
-        # 2. API Request with optimized timeout
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = session.get(f"{API_URL}{number}", headers=headers, timeout=5)
+        # Request with a strict timeout to prevent double-response bugs
+        response = session.get(f"{API_URL}{number}", timeout=8)
         
         if response.status_code == 200:
-            try:
-                data = response.json()
-            except:
-                bot.edit_message_text("⚠️ <b>API Error:</b> The server returned an invalid response.", message.chat.id, status.message_id)
-                return
+            data = response.json()
             
-            if "result" in data and data["result"]:
-                final_response = ""
-                # We limit results to top 3 to avoid hitting Telegram message character limits
-                records = data["result"][:3]
-                
-                for index, record in enumerate(records, start=1):
-                    # Cleaning up data for display
-                    name = str(record.get("name", "N/A")).title()
-                    phone = record.get("mobile", "N/A")
-                    alt_phone = record.get("alternate", "N/A") or "N/A"
-                    father = str(record.get("father_name", "N/A")).title()
-                    circle = record.get("circle", "N/A")
-                    id_num = record.get("id", "N/A")
-                    address = record.get("address", "N/A")
-
+            if data.get("result"):
+                final_response = "<b>✅ SEARCH RESULTS:</b>\n\n"
+                # Showing up to 2 records to keep message length safe
+                for record in data["result"][:2]:
                     final_response += (
-                        f"— Result {index} —\n"
-                        f"👤 <b>Name:</b> <code>{name}</code>\n"
-                        f"📞 <b>Phone:</b> <code>{phone}</code>\n"
-                        f"📱 <b>Alt:</b> <code>{alt_phone}</code>\n"
-                        f"👴 <b>Father:</b> <code>{father}</code>\n"
-                        f"🔴 <b>Circle:</b> <code>{circle}</code>\n"
-                        f"🆔 <b>ID:</b> <code>{id_num}</code>\n"
-                        f"🏠 <b>Address:</b> <code>{address}</code>\n"
-                        f"------------------------------\n\n"
+                        f"👤 <b>Name:</b> <code>{str(record.get('name')).title()}</code>\n"
+                        f"📞 <b>Phone:</b> <code>{record.get('mobile')}</code>\n"
+                        f"👴 <b>Father:</b> <code>{str(record.get('father_name')).title()}</code>\n"
+                        f"🆔 <b>CNIC/ID:</b> <code>{record.get('id')}</code>\n"
+                        f"🏠 <b>Address:</b> <code>{record.get('address')}</code>\n"
+                        f"--------------------------\n"
                     )
                 
-                bot.delete_message(message.chat.id, status.message_id)
+                bot.delete_message(message.chat.id, status_msg.message_id)
                 bot.send_message(message.chat.id, final_response, reply_markup=result_buttons())
                 
-                # --- ADMIN NOTIFICATION ---
-                user = message.from_user
-                username = f"@{user.username}" if user.username else "No Username"
-                
-                admin_log = (
-                    f"✅ <b>Search Successful</b>\n\n"
-                    f"🔢 <b>Number:</b> <code>{number}</code>\n"
-                    f"👤 <b>User:</b> {user.first_name}\n"
-                    f"🆔 <b>ID:</b> <code>{user.id}</code>\n"
-                    f"🌐 <b>Username:</b> {username}"
-                )
-                try:
-                    bot.send_message(ADMIN_ID, admin_log)
-                except:
-                    pass
-            
+                # Admin Log
+                log = f"🔎 <b>Search:</b> <code>{number}</code>\n👤 <b>By:</b> {message.from_user.first_name} ({user_id})"
+                bot.send_message(ADMIN_ID, log)
             else:
-                bot.edit_message_text("❌ <b>Data Not Found:</b> No records found in our database.", message.chat.id, status.message_id)
+                bot.edit_message_text("❌ <b>No records found.</b>", message.chat.id, status_msg.message_id)
         else:
-            bot.edit_message_text("⚠️ <b>API Error:</b> Server busy or down.", message.chat.id, status.message_id)
+            bot.edit_message_text("⚠️ <b>API Error:</b> Server is busy.", message.chat.id, status_msg.message_id)
 
-    except requests.exceptions.Timeout:
-        bot.edit_message_text("⏳ <b>Timeout:</b> Search took too long. Please try again.", message.chat.id, status.message_id)
+    except requests.exceptions.ReadTimeout:
+        bot.edit_message_text("⏳ <b>Timeout:</b> Server took too long to respond.", message.chat.id, status_msg.message_id)
     except Exception as e:
-        bot.edit_message_text("🚫 <b>System Error:</b> Please try again later.", message.chat.id, status.message_id)
+        logging.error(f"Search Error: {e}")
+        bot.edit_message_text("🚫 <b>System Error.</b>", message.chat.id, status_msg.message_id)
 
-# --- VERCEL FLASK HANDLER ---
+# --- WEBHOOK HANDLING ---
 
-@app.route('/' + BOT_TOKEN if BOT_TOKEN else '/webhook', methods=['POST'])
+@app.route('/' + BOT_TOKEN, methods=['POST'])
+def getMessage():
+    json_string = request.get_data().decode('utf-8')
+    update = telebot.types.Update.de_json(json_string)
+    # This prevents the webhook from hanging and causing double-responses
+    bot.process_new_updates([update])
+    return "!", 200
+
+@app.route("/")
 def webhook():
-    if request.headers.get('content-type') == 'application/json':
-        json_string = request.get_data().decode('utf-8')
-        update = telebot.types.Update.de_json(json_string)
-        bot.process_new_updates([update])
-        return 'OK', 200
-    return 'Forbidden', 403
-
-@app.route('/')
-def index():
-    return "Bot is running perfectly.", 200
-
-@app.route('/webhook', methods=['POST'])
-def legacy_webhook():
-    return webhook()
+    bot.remove_webhook()
+    # Replace 'YOUR_VERCEL_URL' with your actual deployment URL
+    # bot.set_webhook(url='https://YOUR_VERCEL_URL/' + BOT_TOKEN)
+    return "Bot is alive", 200
 
 if __name__ == "__main__":
-    app.run(debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5000)))
